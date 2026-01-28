@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>2D TDSE (DST-I + pocketfft WASM)</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #ddd; }
+    #wrap { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+    #panel { padding: 12px; border-right: 1px solid #333; overflow: auto; }
+    #panel h2 { margin: 0 0 8px 0; font-size: 16px; }
+    .row { margin: 10px 0; }
+    .row label { display: flex; justify-content: space-between; font-size: 12px; color: #bbb; }
+    input[type="range"] { width: 100%; }
+    select { width: 100%; padding: 6px; background: #1a1a1a; color: #ddd; border: 1px solid #444; border-radius: 6px; }
+    button { padding: 8px 10px; margin-right: 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 6px; cursor: pointer; }
+    button:hover { border-color: #666; }
+    #stats { font-size: 12px; color: #bbb; line-height: 1.4; margin-top: 10px; }
+    #canvas { width: 100%; height: 100%; display: block; background: #000; }
+    .hint { font-size: 12px; color: #aaa; margin-top: 10px; }
+    code { color: #ddd; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="panel">
+      <h2>2D TDSE (DST-I + pocketfft WASM)</h2>
+
+      <div class="row" data-ui="run">
+        <button id="btnToggle">Start</button>
+        <button id="btnResetPsi">Reset Ψ</button>
+        <button id="btnResetPotential">Reset Potential</button>
+        <button id="btnResetAll">Reset All</button>
+      </div>
+
+      <div class="row" data-ui="grid">
+        <label><span>Grid (k, N=2^k-1)</span><span id="kVal"></span></label>
+        <input id="k" type="range" min="6" max="9" step="1" value="8" />
+        <div class="hint">k=8 ⇒ N=255 (interior points). Dirichlet at ±L.</div>
+      </div>
+
+      <div class="row" data-ui="domain">
+        <label><span>L (domain is [-L,L])</span><span id="LVal"></span></label>
+        <input id="L" type="range" min="5" max="25" step="0.1" value="15" />
+      </div>
+
+      <div class="row" data-ui="timestep">
+        <label><span>Δt</span><span id="dtVal"></span></label>
+        <input id="dt" type="range" min="0.0001" max="0.01" step="0.0001" value="0.001" />
+      </div>
+
+      <div class="row" data-ui="steps">
+        <label><span>Steps per frame</span><span id="stepsVal"></span></label>
+        <input id="steps" type="range" min="1" max="10" step="1" value="1" />
+      </div>
+
+      <div class="row" data-ui="preset">
+        <label><span>Potential preset</span><span id="presetVal"></span></label>
+        <select id="preset"></select>
+        <div class="hint" id="presetInfo"></div>
+      </div>
+
+      <div class="row" data-ui="visualization">
+        <label><span>Visualization</span><span></span></label>
+        <select id="visMode">
+          <option value="phase">Phase</option>
+          <option value="magnitude">Magnitude</option>
+        </select>
+      </div>
+
+      <div class="row" data-ui="brushSize">
+        <label><span>Brush diameter</span><span id="brushSizeVal"></span></label>
+        <input id="brushSize" type="range" min="0.1" max="6" step="0.05" value="1.2" />
+      </div>
+
+      <div class="row" data-ui="brushHardness">
+        <label><span>Brush hardness</span><span id="brushHardnessVal"></span></label>
+        <input id="brushHardness" type="range" min="0" max="1" step="0.01" value="0.7" />
+      </div>
+
+      <div class="row" data-ui="brushValue">
+        <label><span>Brush value</span><span id="brushValueVal"></span></label>
+        <input id="brushValue" type="range" min="-5" max="5" step="0.05" value="1" />
+      </div>
+
+      <div class="row" data-ui="x0">
+        <label><span>Initial x₀</span><span id="x0Val"></span></label>
+        <input id="x0" type="range" min="-6" max="6" step="0.05" value="-0.15" />
+      </div>
+
+      <div class="row" data-ui="y0">
+        <label><span>Initial y₀</span><span id="y0Val"></span></label>
+        <input id="y0" type="range" min="-6" max="6" step="0.05" value="-1" />
+      </div>
+
+      <div class="row" data-ui="vMag">
+        <label><span>Velocity |v|</span><span id="vMagVal"></span></label>
+        <input id="vMag" type="range" min="0" max="10" step="0.1" value="0" />
+      </div>
+
+      <div class="row" data-ui="vAngle">
+        <label><span>Velocity angle (deg)</span><span id="vAngleVal"></span></label>
+        <input id="vAngle" type="range" min="0" max="360" step="1" value="0" />
+      </div>
+
+      <div class="row" data-ui="sigma">
+        <label><span>Gaussian width σ</span><span id="sigmaVal"></span></label>
+        <input id="sigma" type="range" min="0.2" max="4" step="0.05" value="1" />
+      </div>
+
+      <div class="row" data-ui="mask">
+        <label><span>Edge damping extent</span><span id="maskVal"></span></label>
+        <input id="mask" type="range" min="0" max="3" step="0.05" value="0.6" />
+      </div>
+
+      <div class="row" data-ui="renorm">
+        <label><span>Renormalize each step</span><span></span></label>
+        <input id="renorm" type="checkbox" />
+      </div>
+
+      <div id="stats"></div>
+      <div class="hint">
+        Drag on the canvas to paint the potential (brush value in potential units).<br/>
+        Rendering: hue = phase, brightness = |ψ|.
+      </div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

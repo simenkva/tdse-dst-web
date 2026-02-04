@@ -188,6 +188,7 @@ const POTENTIAL_PRESETS = [
   { name: "Waveguide", file: "potentials/guides.png", vMin: 0, vMax: 100 },
   { name: "Mario", file: "potentials/mario.png", vMin: 0, vMax: 50 },
   { name: "Gravity", file: "potentials/gravity.png", vMin: 0, vMax: 500 },
+  { name: "Harmonic oscillator", file: "potentials/harmonic_osc.png", vMin: 0, vMax: 600 },
 ];
 
 async function loadPresetImage(preset) {

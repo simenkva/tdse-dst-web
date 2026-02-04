@@ -26,6 +26,7 @@ const UI_CONFIG = {
   timestep: false,
   steps: false,
   preset: true,
+  integrator: false,
   visualization: true,
   brushSize: true,
   brushHardness: false,
@@ -46,6 +47,7 @@ const DEFAULTS = {
   dt: 0.0025,
   steps: 1,
   presetIndex: 0,
+  integrator: "lie", // "strang" or "lie"
   visMode: "phase",
   brushSize: 1.0,
   brushHardness: 0.7,
@@ -83,6 +85,7 @@ const el = {
   btnResetPsi: document.getElementById("btnResetPsi"),
   btnResetPotential: document.getElementById("btnResetPotential"),
   btnResetAll: document.getElementById("btnResetAll"),
+  btnIntegrator: document.getElementById("btnIntegrator"),
   k: document.getElementById("k"),
   L: document.getElementById("L"),
   dt: document.getElementById("dt"),
@@ -103,6 +106,7 @@ const el = {
   dtVal: document.getElementById("dtVal"),
   stepsVal: document.getElementById("stepsVal"),
   presetVal: document.getElementById("presetVal"),
+  integratorVal: document.getElementById("integratorVal"),
   presetInfo: document.getElementById("presetInfo"),
   maskVal: document.getElementById("maskVal"),
   brushSizeVal: document.getElementById("brushSizeVal"),
@@ -162,6 +166,7 @@ function updateLabels(state) {
   el.dtVal.textContent = `${state.dt.toFixed(4)}`;
   el.stepsVal.textContent = `${state.stepsPerFrame}`;
   el.presetVal.textContent = state.preset ? state.preset.name : "";
+  if (el.integratorVal) el.integratorVal.textContent = getIntegratorLabel(state.integrator);
   el.maskVal.textContent = `${state.maskExtent.toFixed(2)}`;
   el.brushSizeVal.textContent = `${state.brushSize.toFixed(2)}`;
   el.brushHardnessVal.textContent = `${state.brushHardness.toFixed(2)}`;
@@ -174,6 +179,11 @@ function updateLabels(state) {
 }
 
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+function getIntegratorLabel(mode) {
+  if (mode === "lie") return "Lie (T - V)";
+  return "Strang (V/2 - T - V/2)";
+}
 
 const POTENTIAL_PRESETS = [
   // Update these entries to match PNGs in ./potentials (grayscale: 0 => Vmin, 255 => Vmax).
@@ -239,6 +249,7 @@ class TDSE2D {
     this.stepsPerFrame = parseInt(el.steps.value, 10);
     this.renormEnabled = !!el.renorm.checked;
     this.maskExtent = parseFloat(el.mask.value);
+    this.integrator = DEFAULTS.integrator || "strang";
 
     // preset + brush
     this.presetIndex = 0;
@@ -622,15 +633,19 @@ class TDSE2D {
     }
   }
 
-  // ---------- Strang split step ----------
-  stepOnce() {
+  setIntegrator(mode) {
+    const next = mode === "lie" ? "lie" : "strang";
+    this.integrator = next;
+    if (el.integratorVal) el.integratorVal.textContent = getIntegratorLabel(next);
+    if (el.btnIntegrator) el.btnIntegrator.textContent = getIntegratorLabel(next);
+  }
+
+  applyPotentialPhase(scale) {
     const N = this.N;
     const NN = N * N;
-
-    // Half potential: psi *= exp(-i dt/2 V)
-    const half = 0.5 * this.dt;
+    const factor = -this.dt * scale;
     for (let idx = 0; idx < NN; idx++) {
-      const theta = -half * this.V[idx];
+      const theta = factor * this.V[idx];
       const c = Math.cos(theta);
       const s = Math.sin(theta);
       const re = this.psiRe[idx];
@@ -638,9 +653,13 @@ class TDSE2D {
       this.psiRe[idx] = c * re - s * im;
       this.psiIm[idx] = s * re + c * im;
     }
+  }
 
-    // Kinetic full step via 2D DST-I:
-    // Forward DST-I in x (rows), transpose, forward DST-I in y (rows of transposed), multiply phase, inverse DST-I, transpose back, inverse DST-I.
+  applyKineticPhase(KRe, KIm) {
+    const N = this.N;
+    const NN = N * N;
+    const kRe = KRe || this.KRe;
+    const kIm = KIm || this.KIm;
 
     // Copy to WASM memory
     wasm.HEAPF64.set(this.psiRe, this.ptrRe >> 3);
@@ -677,8 +696,8 @@ class TDSE2D {
       for (let m = 0; m < N; m++) {
         const idx = m + N * n; // idx in transposed storage = (m,n) meaning original (n,m)
         const Kidx = n + N * m; // swap indices to match original (m,n)
-        const c = this.KRe[Kidx];
-        const s = this.KIm[Kidx];
+        const c = kRe[Kidx];
+        const s = kIm[Kidx];
         const re = this.tmpRe[idx];
         const im = this.tmpIm[idx];
         this.tmpRe[idx] = c * re - s * im;
@@ -712,17 +731,11 @@ class TDSE2D {
     // Pull back to psi
     this.psiRe.set(wasm.HEAPF64.subarray(this.ptrRe >> 3, (this.ptrRe >> 3) + NN));
     this.psiIm.set(wasm.HEAPF64.subarray(this.ptrIm >> 3, (this.ptrIm >> 3) + NN));
+  }
 
-    // Half potential again
-    for (let idx = 0; idx < NN; idx++) {
-      const theta = -half * this.V[idx];
-      const c = Math.cos(theta);
-      const s = Math.sin(theta);
-      const re = this.psiRe[idx];
-      const im = this.psiIm[idx];
-      this.psiRe[idx] = c * re - s * im;
-      this.psiIm[idx] = s * re + c * im;
-    }
+  finishStep() {
+    const N = this.N;
+    const NN = N * N;
 
     // Edge damping mask
     if (this.maskExtent > 0 && this.maskX && this.maskY) {
@@ -750,6 +763,28 @@ class TDSE2D {
         }
       }
     }
+  }
+
+  stepOnceStrang() {
+    this.applyPotentialPhase(0.5);
+    this.applyKineticPhase(this.KRe, this.KIm);
+    this.applyPotentialPhase(0.5);
+    this.finishStep();
+  }
+
+  stepOnceLie() {
+    this.applyKineticPhase(this.KRe, this.KIm);
+    this.applyPotentialPhase(1.0);
+    this.finishStep();
+  }
+
+  // ---------- Splitting steps ----------
+  stepOnce() {
+    if (this.integrator === "lie") {
+      this.stepOnceLie();
+      return;
+    }
+    this.stepOnceStrang();
   }
 
   // ---------- Rendering ----------
@@ -1046,6 +1081,14 @@ function attachUI() {
       sim.visMode = el.visMode.value;
     });
   }
+  if (el.btnIntegrator) {
+    sim.setIntegrator(sim.integrator);
+    el.btnIntegrator.addEventListener("click", () => {
+      const next = sim.integrator === "strang" ? "lie" : "strang";
+      sim.setIntegrator(next);
+      updateLabels(sim);
+    });
+  }
 
   el.btnToggle.addEventListener("click", () => {
     sim.running = !sim.running;
@@ -1073,6 +1116,7 @@ function attachUI() {
       await sim.setPreset(parseInt(el.preset.value, 10));
     }
     if (el.visMode) sim.visMode = el.visMode.value;
+    sim.setIntegrator(DEFAULTS.integrator || "strang");
     sim.syncBrushValueRange();
     sim.updateBrushFromUI();
     sim.updateGaussianFromUI();

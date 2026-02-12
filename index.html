@@ -12,9 +12,11 @@
     .row { margin: 10px 0; }
     .row label { display: flex; justify-content: space-between; font-size: 12px; color: #bbb; }
     input[type="range"] { width: 100%; }
-    select { width: 100%; padding: 6px; background: #1a1a1a; color: #ddd; border: 1px solid #444; border-radius: 6px; }
+    select, textarea { width: 100%; padding: 6px; background: #1a1a1a; color: #ddd; border: 1px solid #444; border-radius: 6px; box-sizing: border-box; }
+    textarea { resize: vertical; min-height: 70px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     button { padding: 8px 10px; margin-right: 8px; background: #222; color: #ddd; border: 1px solid #444; border-radius: 6px; cursor: pointer; }
     button:hover { border-color: #666; }
+    button.block { width: 100%; margin-right: 0; margin-top: 8px; }
     #stats { font-size: 12px; color: #bbb; line-height: 1.4; margin-top: 10px; }
     #canvas { width: 100%; height: 100%; display: block; background: #000; }
     .hint { font-size: 12px; color: #aaa; margin-top: 10px; }
@@ -58,6 +60,24 @@
         <label><span>Potential preset</span><span id="presetVal"></span></label>
         <select id="preset"></select>
         <div class="hint" id="presetInfo"></div>
+      </div>
+
+      <div class="row" data-ui="symbolicPotential">
+        <select id="symbolicExprExample"></select>
+        <textarea
+          id="symbolicExpr"
+          rows="3"
+          spellcheck="false"
+          placeholder="Example: 0.5 * (x*x + y*y)"
+        ></textarea>
+        <button id="btnEvalSymbolic" class="block">Evaluate expression</button>
+        <button id="btnSaveSymbolic" class="block">Save expression to list</button>
+        <button id="btnDeleteSymbolic" class="block">Delete selected saved formula</button>
+        <div class="hint">
+          Variables: <code>x, y, r, theta, L, N, dx, i, j, pi, e</code>.<br/>
+          Functions: standard <code>Math</code> functions, e.g. <code>sin</code>, <code>exp</code>, <code>sqrt</code>, <code>abs</code>.<br/>
+          Use <code>^</code> or <code>**</code> for powers.
+        </div>
       </div>
 
       <div class="row" data-ui="integrator">

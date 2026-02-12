@@ -21,11 +21,12 @@ async function loadWasm() {
 // ---------- UI visibility config ----------
 const UI_CONFIG = {
   run: true,
-  grid: false,
-  domain: false,
-  timestep: false,
+  grid: true,
+  domain: true,
+  timestep: true,
   steps: false,
   preset: true,
+  symbolicPotential: true,
   integrator: false,
   visualization: true,
   brushSize: true,
@@ -59,6 +60,8 @@ const DEFAULTS = {
   sigma: 1,
   mask: 0.6,
   renorm: false,
+  symbolicExpr: "",
+  symbolicExampleIndex: 0,
 };
 
 // Slider ranges (min/max/step) for inputs that should be configurable.
@@ -91,6 +94,11 @@ const el = {
   dt: document.getElementById("dt"),
   steps: document.getElementById("steps"),
   preset: document.getElementById("preset"),
+  symbolicExprExample: document.getElementById("symbolicExprExample"),
+  symbolicExpr: document.getElementById("symbolicExpr"),
+  btnEvalSymbolic: document.getElementById("btnEvalSymbolic"),
+  btnSaveSymbolic: document.getElementById("btnSaveSymbolic"),
+  btnDeleteSymbolic: document.getElementById("btnDeleteSymbolic"),
   visMode: document.getElementById("visMode"),
   mask: document.getElementById("mask"),
   brushSize: document.getElementById("brushSize"),
@@ -141,6 +149,10 @@ function applyDefaultsToElements() {
   if (el.vAngle) { el.vAngle.value = DEFAULTS.vAngle; el.vAngle.defaultValue = String(DEFAULTS.vAngle); }
   if (el.sigma) { el.sigma.value = DEFAULTS.sigma; el.sigma.defaultValue = String(DEFAULTS.sigma); }
   if (el.mask) { el.mask.value = DEFAULTS.mask; el.mask.defaultValue = String(DEFAULTS.mask); }
+  if (el.symbolicExpr) {
+    el.symbolicExpr.value = DEFAULTS.symbolicExpr || "";
+    el.symbolicExpr.defaultValue = DEFAULTS.symbolicExpr || "";
+  }
   if (el.renorm) {
     el.renorm.checked = !!DEFAULTS.renorm;
     el.renorm.defaultChecked = !!DEFAULTS.renorm;
@@ -165,7 +177,10 @@ function updateLabels(state) {
   el.LVal.textContent = `${state.L.toFixed(2)}`;
   el.dtVal.textContent = `${state.dt.toFixed(4)}`;
   el.stepsVal.textContent = `${state.stepsPerFrame}`;
-  el.presetVal.textContent = state.preset ? state.preset.name : "";
+  const potentialSource = state.symbolicPotentialActive
+    ? "Symbolic expression"
+    : (state.preset ? state.preset.name : "");
+  el.presetVal.textContent = potentialSource;
   if (el.integratorVal) el.integratorVal.textContent = getIntegratorLabel(state.integrator);
   el.maskVal.textContent = `${state.maskExtent.toFixed(2)}`;
   el.brushSizeVal.textContent = `${state.brushSize.toFixed(2)}`;
@@ -201,6 +216,46 @@ const POTENTIAL_PRESETS = [
   { name: "Harmonic oscillator", file: "potentials/harmonic_osc.png", vMin: 0, vMax: 600 },
 ];
 
+// Configurable examples for symbolic potential expressions.
+const SYMBOLIC_POTENTIAL_EXAMPLES = [
+  { name: "Harmonic bowl", expression: "0.5 * (x*x + y*y)" },
+  { name: "Ring barrier", expression: "120 * exp(-((r - 4.2)*(r - 4.2)) / 0.35)" },
+  { name: "Double slit wall", expression: "abs(x) < 0.22 && (abs(y) > 1.1 || abs(y) < 0.35) ? 160 : 0" },
+  { name: "parabola", expression: "100 * (x - 9 > -.5 * y**2)" },
+  { name: "Tilted plane", expression: "35 + 7*x - 4*y" },
+  { name: "Periodic lattice", expression: "30 * (sin(2.6*x)*sin(2.6*x) + sin(2.6*y)*sin(2.6*y))" },
+];
+const SYMBOLIC_SAVED_STORAGE_KEY = "tdse2d.symbolicExamples.v1";
+
+function loadSavedSymbolicExamples() {
+  try {
+    const raw = localStorage.getItem(SYMBOLIC_SAVED_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const normalized = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const name = typeof item.name === "string" ? item.name.trim() : "";
+      const expression = typeof item.expression === "string" ? item.expression.trim() : "";
+      if (!name || !expression) continue;
+      normalized.push({ name, expression });
+    }
+    return normalized;
+  } catch {
+    return [];
+  }
+}
+
+function saveSymbolicExamplesToStorage(examples) {
+  try {
+    localStorage.setItem(SYMBOLIC_SAVED_STORAGE_KEY, JSON.stringify(examples));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function loadPresetImage(preset) {
   if (!preset.file) return null;
   if (preset.image) return preset.image;
@@ -212,6 +267,22 @@ async function loadPresetImage(preset) {
   });
   preset.image = img;
   return img;
+}
+
+function buildSymbolicPotentialEvaluator(expression) {
+  const raw = String(expression ?? "").trim();
+  if (!raw) throw new Error("Expression is empty.");
+
+  // Treat '^' as exponent to support common symbolic syntax.
+  const jsExpr = raw.replace(/\^/g, "**");
+
+  const fn = new Function(
+    "x", "y", "r", "theta", "L", "N", "dx", "i", "j", "pi", "e", "clamp",
+    `"use strict";
+const { abs, acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, ceil, cos, cosh, exp, expm1, floor, hypot, log, log10, log1p, log2, max, min, pow, round, sign, sin, sinh, sqrt, tan, tanh, trunc } = Math;
+return (${jsExpr});`
+  );
+  return { raw, fn };
 }
 
 // ---------- Color mapping (HSV: hue=phase, value=|psi|) ----------
@@ -258,6 +329,10 @@ class TDSE2D {
     this.brushSize = parseFloat(el.brushSize.value);
     this.brushHardness = parseFloat(el.brushHardness.value);
     this.brushValue = parseFloat(el.brushValue.value);
+    this.symbolicExpression = el.symbolicExpr ? el.symbolicExpr.value.trim() : "";
+    this.symbolicPotentialActive = false;
+    this.symbolicRangeMin = 0;
+    this.symbolicRangeMax = 0;
 
     // gaussian initial condition
     this.x0 = parseFloat(el.x0.value);
@@ -362,6 +437,12 @@ class TDSE2D {
 
     // Fill V and initial psi
     await this.applyPresetToGrid();
+    if (this.symbolicPotentialActive && this.symbolicExpression) {
+      const applied = this.applySymbolicExpression(this.symbolicExpression, { updateInput: false });
+      if (!applied.ok) {
+        this.symbolicPotentialActive = false;
+      }
+    }
     this.initPsiGaussian();
     this.buildKineticPhase(); // depends on dt
     this.buildMask();
@@ -527,19 +608,102 @@ class TDSE2D {
     el.mask.value = this.maskExtent;
   }
 
+  getCurrentPotentialRange() {
+    if (this.symbolicPotentialActive && Number.isFinite(this.symbolicRangeMin) && Number.isFinite(this.symbolicRangeMax)) {
+      return { min: this.symbolicRangeMin, max: this.symbolicRangeMax };
+    }
+
+    const presetMin = this.preset ? this.preset.vMin : 0;
+    const presetMax = this.preset ? this.preset.vMax : 0;
+    if (Number.isFinite(presetMin) && Number.isFinite(presetMax) && presetMax > presetMin) {
+      return { min: presetMin, max: presetMax };
+    }
+
+    const src = this.VBase && this.VBase.length ? this.VBase : this.V;
+    if (!src || !src.length) return { min: 0, max: 0 };
+
+    let min = Infinity;
+    let max = -Infinity;
+    for (let idx = 0; idx < src.length; idx++) {
+      const v = src[idx];
+      if (!Number.isFinite(v)) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 0 };
+    return { min, max };
+  }
+
   syncBrushValueRange() {
-    const vMin = this.preset ? this.preset.vMin : 0;
-    const vMax = this.preset ? this.preset.vMax : 0;
-    let min = vMin;
-    let max = vMax;
-    if (Math.abs(vMax - vMin) < 1e-6) {
-      min = vMin - 5;
-      max = vMax + 5;
+    const { min: rangeMin, max: rangeMax } = this.getCurrentPotentialRange();
+    let min = rangeMin;
+    let max = rangeMax;
+    if (Math.abs(rangeMax - rangeMin) < 1e-6) {
+      min = rangeMin - 5;
+      max = rangeMax + 5;
     }
     el.brushValue.min = min.toFixed(2);
     el.brushValue.max = max.toFixed(2);
     this.brushValue = clamp(parseFloat(el.brushValue.value), min, max);
     el.brushValue.value = this.brushValue;
+  }
+
+  applySymbolicExpression(expression, options = {}) {
+    const { updateInput = true } = options;
+    if (!this.VBase || !this.V || !this.x || !this.y) {
+      el.presetInfo.textContent = "Grid is not initialized yet.";
+      return { ok: false, error: "Grid is not initialized yet." };
+    }
+
+    let compiled = null;
+    try {
+      compiled = buildSymbolicPotentialEvaluator(expression);
+    } catch (err) {
+      const message = `Expression parse error: ${err.message}`;
+      el.presetInfo.textContent = message;
+      return { ok: false, error: message };
+    }
+
+    const N = this.N;
+    const next = new Float64Array(N * N);
+    let min = Infinity;
+    let max = -Infinity;
+    try {
+      for (let j = 0; j < N; j++) {
+        const y = this.y[j];
+        for (let i = 0; i < N; i++) {
+          const x = this.x[i];
+          const r = Math.hypot(x, y);
+          const theta = Math.atan2(y, x);
+          const idx = i + N * j;
+          const value = Number(compiled.fn(x, y, r, theta, this.L, N, this.dx, i, j, Math.PI, Math.E, clamp));
+          if (!Number.isFinite(value)) {
+            throw new Error(`Non-finite value at i=${i}, j=${j}`);
+          }
+          next[idx] = value;
+          if (value < min) min = value;
+          if (value > max) max = value;
+        }
+      }
+    } catch (err) {
+      const message = `Expression evaluation error: ${err.message}`;
+      el.presetInfo.textContent = message;
+      return { ok: false, error: message };
+    }
+
+    this.VBase.set(next);
+    this.V.set(next);
+    this.symbolicExpression = compiled.raw;
+    this.symbolicPotentialActive = true;
+    this.symbolicRangeMin = min;
+    this.symbolicRangeMax = max;
+    if (updateInput && el.symbolicExpr) {
+      el.symbolicExpr.value = this.symbolicExpression;
+    }
+    this.syncBrushValueRange();
+    updateLabels(this);
+    el.presetInfo.textContent = `Symbolic potential active (Vmin=${min.toFixed(2)}, Vmax=${max.toFixed(2)}).`;
+    return { ok: true };
   }
 
   updateBrushFromUI() {
@@ -585,6 +749,7 @@ class TDSE2D {
     const next = clamp(index, 0, POTENTIAL_PRESETS.length - 1);
     this.presetIndex = next;
     this.preset = POTENTIAL_PRESETS[next];
+    this.symbolicPotentialActive = false;
     const token = ++this.presetToken;
     el.preset.value = String(next);
     this.syncBrushValueRange();
@@ -801,11 +966,10 @@ class TDSE2D {
 
     // auto-scale magnitude to [0,1] using max
     let maxMag = 0;
-    const presetMin = this.preset ? this.preset.vMin : 0;
-    const presetMax = this.preset ? this.preset.vMax : 0;
-    const useDynamicRange = presetMax <= presetMin;
-    let vMin = presetMin;
-    let vMax = presetMax;
+    const range = this.getCurrentPotentialRange();
+    const useDynamicRange = range.max <= range.min;
+    let vMin = range.min;
+    let vMax = range.max;
     const showMagnitude = this.visMode === "magnitude";
     if (useDynamicRange) {
       vMin = Infinity;
@@ -933,8 +1097,7 @@ class TDSE2D {
       const cy = offsetY + v * size;
       const r = Math.max(2, ((this.brushSize * 0.5) / (2 * L)) * size);
 
-      const vMin = this.preset ? this.preset.vMin : 0;
-      const vMax = this.preset ? this.preset.vMax : 0;
+      const { min: vMin, max: vMax } = this.getCurrentPotentialRange();
       const range = vMax - vMin;
       const t = range > 1e-6 ? clamp((this.brushValue - vMin) / range, 0, 1) : 1;
       const alpha = lerp(0.2, 1.0, t);
@@ -1075,6 +1238,193 @@ function attachUI() {
   el.preset.addEventListener("change", async () => {
     await sim.setPreset(parseInt(el.preset.value, 10));
   });
+
+  let savedSymbolicExamples = loadSavedSymbolicExamples();
+  function getDefaultSymbolicExampleValue() {
+    const idx = Number.isInteger(DEFAULTS.symbolicExampleIndex)
+      ? clamp(DEFAULTS.symbolicExampleIndex, -1, SYMBOLIC_POTENTIAL_EXAMPLES.length - 1)
+      : -1;
+    return idx >= 0 ? `builtin:${idx}` : "custom";
+  }
+  function getSymbolicExpressionForOption(value) {
+    if (typeof value !== "string") return null;
+    if (value.startsWith("builtin:")) {
+      const idx = parseInt(value.slice("builtin:".length), 10);
+      if (Number.isInteger(idx) && idx >= 0 && idx < SYMBOLIC_POTENTIAL_EXAMPLES.length) {
+        return SYMBOLIC_POTENTIAL_EXAMPLES[idx].expression;
+      }
+      return null;
+    }
+    if (value.startsWith("saved:")) {
+      const idx = parseInt(value.slice("saved:".length), 10);
+      if (Number.isInteger(idx) && idx >= 0 && idx < savedSymbolicExamples.length) {
+        return savedSymbolicExamples[idx].expression;
+      }
+      return null;
+    }
+    return null;
+  }
+  function getSavedSymbolicIndexFromSelection() {
+    const value = el.symbolicExprExample ? el.symbolicExprExample.value : "";
+    if (typeof value !== "string" || !value.startsWith("saved:")) return -1;
+    const idx = parseInt(value.slice("saved:".length), 10);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= savedSymbolicExamples.length) return -1;
+    return idx;
+  }
+  function updateSymbolicActionButtons() {
+    if (!el.btnDeleteSymbolic) return;
+    el.btnDeleteSymbolic.disabled = getSavedSymbolicIndexFromSelection() < 0;
+  }
+  function syncExpressionFromDropdownSelection() {
+    if (!el.symbolicExprExample || !el.symbolicExpr) return;
+    const expression = getSymbolicExpressionForOption(el.symbolicExprExample.value);
+    if (expression !== null) {
+      el.symbolicExpr.value = expression;
+    }
+  }
+  function rebuildSymbolicDropdown(selectedValue = null) {
+    if (!el.symbolicExprExample) return;
+    const defaultValue = getDefaultSymbolicExampleValue();
+    el.symbolicExprExample.innerHTML = "";
+
+    const customOption = document.createElement("option");
+    customOption.value = "custom";
+    customOption.textContent = "Custom expression";
+    customOption.defaultSelected = defaultValue === "custom";
+    el.symbolicExprExample.appendChild(customOption);
+
+    SYMBOLIC_POTENTIAL_EXAMPLES.forEach((sample, idx) => {
+      const opt = document.createElement("option");
+      opt.value = `builtin:${idx}`;
+      opt.textContent = sample.name;
+      opt.defaultSelected = defaultValue === opt.value;
+      el.symbolicExprExample.appendChild(opt);
+    });
+
+    savedSymbolicExamples.forEach((sample, idx) => {
+      const opt = document.createElement("option");
+      opt.value = `saved:${idx}`;
+      opt.textContent = `${sample.name} (saved)`;
+      opt.defaultSelected = false;
+      el.symbolicExprExample.appendChild(opt);
+    });
+
+    const values = Array.from(el.symbolicExprExample.options).map((opt) => opt.value);
+    const nextValue = selectedValue && values.includes(selectedValue)
+      ? selectedValue
+      : (values.includes(defaultValue) ? defaultValue : "custom");
+    el.symbolicExprExample.value = nextValue;
+    updateSymbolicActionButtons();
+  }
+
+  if (el.symbolicExprExample) {
+    rebuildSymbolicDropdown();
+
+    if (el.symbolicExpr && !(el.symbolicExpr.value || "").trim()) {
+      const defaultExpression = getSymbolicExpressionForOption(el.symbolicExprExample.value);
+      if (defaultExpression !== null) {
+        el.symbolicExpr.value = defaultExpression;
+        el.symbolicExpr.defaultValue = defaultExpression;
+      }
+    }
+
+    el.symbolicExprExample.addEventListener("change", () => {
+      syncExpressionFromDropdownSelection();
+      updateSymbolicActionButtons();
+    });
+  }
+
+  function evaluateSymbolicPotential() {
+    const expression = el.symbolicExpr ? el.symbolicExpr.value : "";
+    sim.applySymbolicExpression(expression);
+  }
+  if (el.btnEvalSymbolic) {
+    el.btnEvalSymbolic.addEventListener("click", evaluateSymbolicPotential);
+  }
+  if (el.btnSaveSymbolic) {
+    el.btnSaveSymbolic.addEventListener("click", () => {
+      if (!el.symbolicExpr) return;
+      const expression = el.symbolicExpr.value.trim();
+      if (!expression) {
+        el.presetInfo.textContent = "Cannot save an empty expression.";
+        return;
+      }
+
+      const currentSelection = el.symbolicExprExample ? el.symbolicExprExample.value : "custom";
+      let suggestedName = `Formula ${savedSymbolicExamples.length + 1}`;
+      if (typeof currentSelection === "string" && currentSelection.startsWith("saved:")) {
+        const idx = parseInt(currentSelection.slice("saved:".length), 10);
+        if (Number.isInteger(idx) && idx >= 0 && idx < savedSymbolicExamples.length) {
+          suggestedName = savedSymbolicExamples[idx].name;
+        }
+      }
+      const typedName = prompt("Name for this saved expression:", suggestedName);
+      if (typedName === null) return;
+      const name = typedName.trim();
+      if (!name) {
+        el.presetInfo.textContent = "Save cancelled: name is empty.";
+        return;
+      }
+
+      const existingIdx = savedSymbolicExamples.findIndex(
+        (item) => item.name.toLowerCase() === name.toLowerCase()
+      );
+      if (existingIdx >= 0) {
+        savedSymbolicExamples[existingIdx] = { name, expression };
+        if (!saveSymbolicExamplesToStorage(savedSymbolicExamples)) {
+          el.presetInfo.textContent = "Could not save to browser storage.";
+          return;
+        }
+        rebuildSymbolicDropdown(`saved:${existingIdx}`);
+        el.presetInfo.textContent = `Updated saved expression "${name}".`;
+        return;
+      }
+
+      savedSymbolicExamples.push({ name, expression });
+      if (!saveSymbolicExamplesToStorage(savedSymbolicExamples)) {
+        savedSymbolicExamples.pop();
+        el.presetInfo.textContent = "Could not save to browser storage.";
+        return;
+      }
+      const newIdx = savedSymbolicExamples.length - 1;
+      rebuildSymbolicDropdown(`saved:${newIdx}`);
+      el.presetInfo.textContent = `Saved expression "${name}" to browser storage.`;
+    });
+  }
+  if (el.btnDeleteSymbolic) {
+    el.btnDeleteSymbolic.addEventListener("click", () => {
+      const idx = getSavedSymbolicIndexFromSelection();
+      if (idx < 0) {
+        el.presetInfo.textContent = "Select a saved formula to delete.";
+        return;
+      }
+
+      const item = savedSymbolicExamples[idx];
+      const ok = confirm(`Delete saved formula "${item.name}"?`);
+      if (!ok) return;
+
+      const removed = savedSymbolicExamples.splice(idx, 1)[0];
+      if (!saveSymbolicExamplesToStorage(savedSymbolicExamples)) {
+        savedSymbolicExamples.splice(idx, 0, removed);
+        el.presetInfo.textContent = "Could not delete from browser storage.";
+        return;
+      }
+
+      rebuildSymbolicDropdown("custom");
+      updateSymbolicActionButtons();
+      el.presetInfo.textContent = `Deleted saved expression "${item.name}".`;
+    });
+    updateSymbolicActionButtons();
+  }
+  if (el.symbolicExpr) {
+    el.symbolicExpr.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        evaluateSymbolicPotential();
+      }
+    });
+  }
+
   if (el.visMode) {
     el.visMode.value = sim.visMode;
     el.visMode.addEventListener("change", () => {
@@ -1105,11 +1455,13 @@ function attachUI() {
     const controls = [
       el.k, el.L, el.dt, el.steps, el.mask,
       el.preset, el.visMode,
+      el.symbolicExprExample, el.symbolicExpr,
       el.brushSize, el.brushHardness, el.brushValue,
       el.x0, el.y0, el.vMag, el.vAngle, el.sigma,
       el.renorm,
     ];
     controls.forEach(resetControlToDefault);
+    syncExpressionFromDropdownSelection();
 
     await sim.updateParamsFromUI();
     if (el.preset) {
